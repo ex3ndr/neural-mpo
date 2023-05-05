@@ -1,7 +1,5 @@
 import os
-from time import sleep
 import numpy as np
-from scipy.optimize import minimize
 from tqdm import tqdm
 import torch
 from torch.nn.utils import clip_grad_norm_
@@ -10,6 +8,8 @@ from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from mpo.actor import ActorContinuous, ActorDiscrete
 from mpo.critic import Critic, CriticOptimizerContinuous, CriticOptimizerDiscrete
+from mpo.e_step import EStepContinuous, EStepDiscrete
+from mpo.experience import ExperienceBuffer
 from mpo.math.kl import gaussian_kl, categorical_kl
 from mpo.replaybuffer import ReplayBuffer
 from mpo.sampler import SamplerSimple
@@ -135,16 +135,22 @@ class MPO(object):
                 discount_factor=self.γ,
                 lr=3e-4
             )
+        if self.continuous_action_space:
+            self.e_step = EStepContinuous(self.ds, self.da, self.target_actor, self.target_critic,
+                                          self.sample_action_num)
+        else:
+            self.e_step = EStepDiscrete(self.ds, self.da, self.target_actor, self.target_critic)
 
         # Sampler
         self.sampler = SamplerSimple(env, sample_episode_maxstep)
 
-        self.η = np.random.rand()
         self.α_μ = 0.0  # lagrangian multiplier for continuous action space in the M-step
         self.α_Σ = 0.0  # lagrangian multiplier for continuous action space in the M-step
         self.α = 0.0  # lagrangian multiplier for discrete action space in the M-step
 
+        # Buffers
         self.replaybuffer = ReplayBuffer()
+        self.experiences = ExperienceBuffer()
 
         self.iteration = 1
 
@@ -154,9 +160,6 @@ class MPO(object):
         :param log_dir:
         """
 
-        model_save_dir = os.path.join(log_dir, 'model')
-        if not os.path.exists(model_save_dir):
-            os.makedirs(model_save_dir)
         writer = SummaryWriter(os.path.join(log_dir, 'tb'))
 
         for it in range(self.iteration, iteration_num + 1):
@@ -165,7 +168,9 @@ class MPO(object):
             self.replaybuffer.clear()
             samples = self.sampler.sample(self.target_actor, self.sample_episode_num)
             self.replaybuffer.store_episodes(samples)
+            self.experiences.store_episodes(samples)
 
+            # Parameters
             buff_sz = len(self.replaybuffer)
             mean_reward = self.replaybuffer.mean_reward()
             mean_return = self.replaybuffer.mean_return()
@@ -178,218 +183,165 @@ class MPO(object):
             max_kl = []
             mean_Σ_det = []
 
+            # Policy Evaluation
+            # [2] 3 Policy Evaluation (Step 1)
             for r in range(self.episode_rerun_num):
                 for indices in tqdm(
                         BatchSampler(
                             SubsetRandomSampler(range(buff_sz)), self.batch_size, drop_last=True),
-                        desc='training {}/{}'.format(r + 1, self.episode_rerun_num)):
-                    K = len(indices)  # the sample number of states
-                    N = self.sample_action_num  # the sample number of actions per state
-                    ds = self.ds  # the number of state space dimensions
-                    da = self.da  # the number of action space dimensions
-
+                        desc='policy evaluation {}/{}'.format(r + 1, self.episode_rerun_num)):
+                    # Load batch
                     state_batch, action_batch, next_state_batch, reward_batch = zip(
                         *[self.replaybuffer[index] for index in indices])
 
-                    state_batch = torch.from_numpy(np.stack(state_batch)).type(torch.float32).to(self.device)  # (K, ds)
-                    action_batch = torch.from_numpy(np.stack(action_batch)).type(torch.float32).to(
-                        self.device)  # (K, da) or (K,)
-                    next_state_batch = torch.from_numpy(np.stack(next_state_batch)).type(torch.float32).to(
-                        self.device)  # (K, ds)
-                    reward_batch = torch.from_numpy(np.stack(reward_batch)).type(torch.float32).to(self.device)  # (K,)
-
-                    # Policy Evaluation
-                    # [2] 3 Policy Evaluation (Step 1)
+                    # Critic optimization
                     loss_q, q = self.critic_optimizer.train(
                         batch_state=state_batch,
                         batch_action=action_batch,
                         batch_next_state=next_state_batch,
                         batch_reward=reward_batch,
                     )
+
+                    # Stats
                     mean_loss_q.append(loss_q.item())
                     mean_est_q.append(q.abs().mean().item())
 
-                    # E-Step of Policy Improvement
-                    # [2] 4.1 Finding action weights (Step 2)
-                    with torch.no_grad():
-                        if self.continuous_action_space:
-                            # sample N actions per state
-                            b_μ, b_A = self.target_actor.forward(state_batch)  # (K,)
-                            b = MultivariateNormal(b_μ, scale_tril=b_A)  # (K,)
-                            sampled_actions = b.sample((N,))  # (N, K, da)
-                            expanded_states = state_batch[None, ...].expand(N, -1, -1)  # (N, K, ds)
-                            target_q = self.target_critic.forward(
-                                expanded_states.reshape(-1, ds),  # (N * K, ds)
-                                sampled_actions.reshape(-1, da)  # (N * K, da)
-                            ).reshape(N, K)  # (N, K)
-                            target_q_np = target_q.cpu().transpose(0, 1).numpy()  # (K, N)
-                        else:  # discrete action spaces
-                            # sample da actions per state
-                            # Because of discrete action space, we can cover the all actions per state.
-                            actions = torch.arange(da)[..., None].expand(da, K).to(self.device)  # (da, K)
-                            b_p = self.target_actor.forward(state_batch)  # (K, da)
-                            b = Categorical(probs=b_p)  # (K,)
-                            b_prob = b.expand((da, K)).log_prob(actions).exp()  # (da, K)
-                            expanded_actions = self.A_eye[None, ...].expand(K, -1, -1)  # (K, da, da)
-                            expanded_states = state_batch.reshape(K, 1, ds).expand((K, da, ds))  # (K, da, ds)
-                            target_q = (
-                                self.target_critic.forward(
-                                    expanded_states.reshape(-1, ds),  # (K * da, ds)
-                                    expanded_actions.reshape(-1, da)  # (K * da, da)
-                                ).reshape(K, da)  # (K, da)
-                            ).transpose(0, 1)  # (da, K)
-                            b_prob_np = b_prob.cpu().transpose(0, 1).numpy()  # (K, da)
-                            target_q_np = target_q.cpu().transpose(0, 1).numpy()  # (K, da)
+            # Skip if there is not enough experiences
+            if len(self.experiences) < self.batch_size * 8:
+                continue
 
-                    # https://arxiv.org/pdf/1812.02256.pdf
-                    # [2] 4.1 Finding action weights (Step 2)
-                    #   Using an exponential transformation of the Q-values
+            # Policy Improvement (Step 2 + 3)
+            for r in range(self.episode_rerun_num * 10):
+
+                K = self.batch_size * 8  # the sample number of states
+                N = self.sample_action_num  # the sample number of actions per state
+                da = self.da  # the number of action space dimensions
+
+                # Load experiences
+                state_batch = self.experiences.sample(self.batch_size * 8).to(self.device)
+
+                # E-Step of Policy Improvement
+                qij, actions, probs = self.e_step.train(state_batch, self.ε_dual)
+
+                # M-Step of Policy Improvement
+                # [2] 4.2 Fitting an improved policy (Step 3)
+                for _ in range(self.mstep_iteration_num):
                     if self.continuous_action_space:
-                        def dual(η):
-                            """
-                            dual function of the non-parametric variational
-                            Q = target_q_np  (K, N)
-                            g(η) = η*ε + η*mean(log(mean(exp(Q(s, a)/η), along=a)), along=s)
-                            For numerical stabilization, this can be modified to
-                            Qj = max(Q(s, a), along=a)
-                            g(η) = η*ε + mean(Qj, along=j) + η*mean(log(mean(exp((Q(s, a)-Qj)/η), along=a)), along=s)
-                            """
-                            max_q = np.max(target_q_np, 1)
-                            return η * self.ε_dual + np.mean(max_q) \
-                                + η * np.mean(np.log(np.mean(np.exp((target_q_np - max_q[:, None]) / η), axis=1)))
+                        μ, A = self.actor.forward(state_batch)
+                        # First term of last eq of [2] p.5
+                        # see also [2] 4.2.1 Fitting an improved Gaussian policy
+                        π1 = MultivariateNormal(loc=μ, scale_tril=probs[1])  # (K,)
+                        π2 = MultivariateNormal(loc=probs[0], scale_tril=A)  # (K,)
+                        loss_p = torch.mean(
+                            qij * (
+                                    π1.expand((N, K)).log_prob(actions)  # (N, K)
+                                    + π2.expand((N, K)).log_prob(actions)  # (N, K)
+                            )
+                        )
+                        mean_loss_p.append((-loss_p).item())
+
+                        kl_μ, kl_Σ, Σi_det, Σ_det = gaussian_kl(
+                            mu_i=probs[0], mu=μ,
+                            a_i=probs[1], a=A)
+                        max_kl_μ.append(kl_μ.item())
+                        max_kl_Σ.append(kl_Σ.item())
+                        mean_Σ_det.append(Σ_det.item())
+
+                        if np.isnan(kl_μ.item()):  # This should not happen
+                            raise RuntimeError('kl_μ is nan')
+                        if np.isnan(kl_Σ.item()):  # This should not happen
+                            raise RuntimeError('kl_Σ is nan')
+
+                        # Update lagrange multipliers by gradient descent
+                        # this equation is derived from last eq of [2] p.5,
+                        # just differentiate with respect to α
+                        # and update α so that the equation is to be minimized.
+                        self.α_μ -= self.α_μ_scale * (self.ε_kl_μ - kl_μ).detach().item()
+                        self.α_Σ -= self.α_Σ_scale * (self.ε_kl_Σ - kl_Σ).detach().item()
+
+                        self.α_μ = np.clip(0.0, self.α_μ, self.α_μ_max)
+                        self.α_Σ = np.clip(0.0, self.α_Σ, self.α_Σ_max)
+
+                        self.actor_optimizer.zero_grad()
+                        # last eq of [2] p.5
+                        loss_l = -(
+                                loss_p
+                                + self.α_μ * (self.ε_kl_μ - kl_μ)
+                                + self.α_Σ * (self.ε_kl_Σ - kl_Σ)
+                        )
+                        mean_loss_l.append(loss_l.item())
+                        loss_l.backward()
+                        clip_grad_norm_(self.actor.parameters(), 0.1)
+                        self.actor_optimizer.step()
                     else:  # discrete action space
-                        def dual(η):
-                            """
-                            dual function of the non-parametric variational
-                            g(η) = η*ε + η*mean(log(sum(π(a|s)*exp(Q(s, a)/η))))
-                            We have to multiply π by exp because this is expectation.
-                            This equation is correspond to last equation of the [2] p.15
-                            For numerical stabilization, this can be modified to
-                            Qj = max(Q(s, a), along=a)
-                            g(η) = η*ε + mean(Qj, along=j) + η*mean(log(sum(π(a|s)*(exp(Q(s, a)-Qj)/η))))
-                            """
-                            max_q = np.max(target_q_np, 1)
-                            return η * self.ε_dual + np.mean(max_q) \
-                                + η * np.mean(np.log(np.sum(
-                                    b_prob_np * np.exp((target_q_np - max_q[:, None]) / η), axis=1)))
+                        π_p = self.actor.forward(state_batch)  # (K, da)
+                        # First term of last eq of [2] p.5
+                        π = Categorical(probs=π_p)  # (K,)
+                        loss_p = torch.mean(
+                            qij * π.expand((da, K)).log_prob(actions)
+                        )
+                        mean_loss_p.append((-loss_p).item())
 
-                    bounds = [(1e-6, None)]
-                    res = minimize(dual, np.array([self.η]), method='SLSQP', bounds=bounds)
-                    self.η = res.x[0]
+                        kl = categorical_kl(p1=π_p, p2=probs)
+                        max_kl.append(kl.item())
 
-                    qij = torch.softmax(target_q / self.η, dim=0)  # (N, K) or (da, K)
+                        if np.isnan(kl.item()):  # This should not happen
+                            raise RuntimeError('kl is nan')
 
-                    # M-Step of Policy Improvement
-                    # [2] 4.2 Fitting an improved policy (Step 3)
-                    for _ in range(self.mstep_iteration_num):
-                        if self.continuous_action_space:
-                            μ, A = self.actor.forward(state_batch)
-                            # First term of last eq of [2] p.5
-                            # see also [2] 4.2.1 Fitting an improved Gaussian policy
-                            π1 = MultivariateNormal(loc=μ, scale_tril=b_A)  # (K,)
-                            π2 = MultivariateNormal(loc=b_μ, scale_tril=A)  # (K,)
-                            loss_p = torch.mean(
-                                qij * (
-                                        π1.expand((N, K)).log_prob(sampled_actions)  # (N, K)
-                                        + π2.expand((N, K)).log_prob(sampled_actions)  # (N, K)
-                                )
-                            )
-                            mean_loss_p.append((-loss_p).item())
+                        # Update lagrange multipliers by gradient descent
+                        # this equation is derived from last eq of [2] p.5,
+                        # just differentiate with respect to α
+                        # and update α so that the equation is to be minimized.
+                        self.α -= self.α_scale * (self.ε_kl - kl).detach().item()
 
-                            kl_μ, kl_Σ, Σi_det, Σ_det = gaussian_kl(
-                                mu_i=b_μ, mu=μ,
-                                a_i=b_A, a=A)
-                            max_kl_μ.append(kl_μ.item())
-                            max_kl_Σ.append(kl_Σ.item())
-                            mean_Σ_det.append(Σ_det.item())
+                        self.α = np.clip(self.α, 0.0, self.α_max)
 
-                            if np.isnan(kl_μ.item()):  # This should not happen
-                                raise RuntimeError('kl_μ is nan')
-                            if np.isnan(kl_Σ.item()):  # This should not happen
-                                raise RuntimeError('kl_Σ is nan')
+                        self.actor_optimizer.zero_grad()
+                        # last eq of [2] p.5
+                        loss_l = -(loss_p + self.α * (self.ε_kl - kl))
+                        mean_loss_l.append(loss_l.item())
+                        loss_l.backward()
+                        clip_grad_norm_(self.actor.parameters(), 0.1)
+                        self.actor_optimizer.step()
 
-                            # Update lagrange multipliers by gradient descent
-                            # this equation is derived from last eq of [2] p.5,
-                            # just differentiate with respect to α
-                            # and update α so that the equation is to be minimized.
-                            self.α_μ -= self.α_μ_scale * (self.ε_kl_μ - kl_μ).detach().item()
-                            self.α_Σ -= self.α_Σ_scale * (self.ε_kl_Σ - kl_Σ).detach().item()
-
-                            self.α_μ = np.clip(0.0, self.α_μ, self.α_μ_max)
-                            self.α_Σ = np.clip(0.0, self.α_Σ, self.α_Σ_max)
-
-                            self.actor_optimizer.zero_grad()
-                            # last eq of [2] p.5
-                            loss_l = -(
-                                    loss_p
-                                    + self.α_μ * (self.ε_kl_μ - kl_μ)
-                                    + self.α_Σ * (self.ε_kl_Σ - kl_Σ)
-                            )
-                            mean_loss_l.append(loss_l.item())
-                            loss_l.backward()
-                            clip_grad_norm_(self.actor.parameters(), 0.1)
-                            self.actor_optimizer.step()
-                        else:  # discrete action space
-                            π_p = self.actor.forward(state_batch)  # (K, da)
-                            # First term of last eq of [2] p.5
-                            π = Categorical(probs=π_p)  # (K,)
-                            loss_p = torch.mean(
-                                qij * π.expand((da, K)).log_prob(actions)
-                            )
-                            mean_loss_p.append((-loss_p).item())
-
-                            kl = categorical_kl(p1=π_p, p2=b_p)
-                            max_kl.append(kl.item())
-
-                            if np.isnan(kl.item()):  # This should not happen
-                                raise RuntimeError('kl is nan')
-
-                            # Update lagrange multipliers by gradient descent
-                            # this equation is derived from last eq of [2] p.5,
-                            # just differentiate with respect to α
-                            # and update α so that the equation is to be minimized.
-                            self.α -= self.α_scale * (self.ε_kl - kl).detach().item()
-
-                            self.α = np.clip(self.α, 0.0, self.α_max)
-
-                            self.actor_optimizer.zero_grad()
-                            # last eq of [2] p.5
-                            loss_l = -(loss_p + self.α * (self.ε_kl - kl))
-                            mean_loss_l.append(loss_l.item())
-                            loss_l.backward()
-                            clip_grad_norm_(self.actor.parameters(), 0.1)
-                            self.actor_optimizer.step()
+            #
+            # Copy to target networks
+            #
 
             self.__update_param()
+
+            #
+            # Logging
+            #
 
             mean_loss_q = np.mean(mean_loss_q)
             mean_loss_p = np.mean(mean_loss_p)
             mean_loss_l = np.mean(mean_loss_l)
             mean_est_q = np.mean(mean_est_q)
-            if self.continuous_action_space:
-                max_kl_μ = np.max(max_kl_μ)
-                max_kl_Σ = np.max(max_kl_Σ)
-                mean_Σ_det = np.mean(mean_Σ_det)
-            else:  # discrete action space
-                max_kl = np.max(max_kl)
-
+            # if self.continuous_action_space:
+            #     max_kl_μ = np.max(max_kl_μ)
+            #     max_kl_Σ = np.max(max_kl_Σ)
+            #     mean_Σ_det = np.mean(mean_Σ_det)
+            # else:  # discrete action space
+            #     max_kl = np.max(max_kl)
             print('iteration :', it)
             print('  replay buffer :', buff_sz)
+            print('  experience buffer :', len(self.experiences))
             print('  mean return :', mean_return)
             print('  mean reward :', mean_reward)
             print('  mean loss_q :', mean_loss_q)
             print('  mean loss_p :', mean_loss_p)
             print('  mean loss_l :', mean_loss_l)
             print('  mean est_q :', mean_est_q)
-            print('  η :', self.η)
+            print('  η :', self.e_step.eta)
             if self.continuous_action_space:
-                print('  max_kl_μ :', max_kl_μ)
-                print('  max_kl_Σ :', max_kl_Σ)
-                print('  mean_Σ_det :', mean_Σ_det)
+                # print('  max_kl_μ :', max_kl_μ)
+                # print('  max_kl_Σ :', max_kl_Σ)
+                # print('  mean_Σ_det :', mean_Σ_det)
                 print('  α_μ :', self.α_μ)
                 print('  α_Σ :', self.α_Σ)
             else:  # discrete action space
-                print('  max_kl :', max_kl)
+                # print('  max_kl :', max_kl)
                 print('  α :', self.α)
 
             writer.add_scalar('return', mean_return, it)
@@ -398,15 +350,15 @@ class MPO(object):
             writer.add_scalar('loss_p', mean_loss_p, it)
             writer.add_scalar('loss_l', mean_loss_l, it)
             writer.add_scalar('mean_q', mean_est_q, it)
-            writer.add_scalar('η', self.η, it)
+            writer.add_scalar('η', self.e_step.eta, it)
             if self.continuous_action_space:
-                writer.add_scalar('max_kl_μ', max_kl_μ, it)
-                writer.add_scalar('max_kl_Σ', max_kl_Σ, it)
-                writer.add_scalar('mean_Σ_det', mean_Σ_det, it)
+                # writer.add_scalar('max_kl_μ', max_kl_μ, it)
+                # writer.add_scalar('max_kl_Σ', max_kl_Σ, it)
+                # writer.add_scalar('mean_Σ_det', mean_Σ_det, it)
                 writer.add_scalar('α_μ', self.α_μ, it)
                 writer.add_scalar('α_Σ', self.α_Σ, it)
             else:
-                writer.add_scalar('η_kl', max_kl, it)
+                # writer.add_scalar('η_kl', max_kl, it)
                 writer.add_scalar('α', self.α, it)
             writer.flush()
 

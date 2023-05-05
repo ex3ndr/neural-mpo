@@ -15,6 +15,7 @@ class SamplerSimple:
         for steps in range(self.max_step):
             action = actor.action_sample(state)
             next_state, reward, termination, _, _ = self.env.step(action)
+            # reward = reward * 0.001  # Rescale reward
             buff.append((state, action, next_state, reward))
             if termination:
                 break

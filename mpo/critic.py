@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+import numpy as np
 from torch.distributions import MultivariateNormal, Categorical
 
 
@@ -15,6 +16,12 @@ class Critic(nn.Module):
         self.layer_2 = nn.Linear(400, 400)
         self.layer_3 = nn.Linear(400, 300)
         self.layer_4 = nn.Linear(300, 1)
+
+        # Initialize weights
+        torch.nn.init.uniform_(self.layer_1.weight.data, -3e-3, 3e-3)
+        torch.nn.init.uniform_(self.layer_2.weight.data, -3e-3, 3e-3)
+        torch.nn.init.uniform_(self.layer_3.weight.data, -3e-3, 3e-3)
+        torch.nn.init.uniform_(self.layer_4.weight.data, -3e-3, 3e-3)
 
     def forward(self, state, action):
         x = torch.cat([state, action], dim=1)
@@ -36,6 +43,21 @@ class CriticOptimizerDiscrete:
         self.action_eye = torch.eye(critic.actions)
 
     def train(self, batch_state, batch_action, batch_reward, batch_next_state):
+        # Convert to tensors
+        batch_state = torch.from_numpy(np.stack(batch_state)) \
+            .type(torch.float32) \
+            .to(self.critic.device)
+        batch_action = torch.from_numpy(np.stack(batch_action)) \
+            .type(torch.float32) \
+            .to(self.critic.device)
+        batch_next_state = torch.from_numpy(np.stack(batch_next_state)) \
+            .type(torch.float32) \
+            .to(self.critic.device)
+        batch_reward = torch.from_numpy(np.stack(batch_reward)) \
+            .type(torch.float32) \
+            .to(self.critic.device)
+
+        # Collect shapes
         batch_size = batch_state.size(0)
         observations = self.critic.observations
         actions = self.critic.actions
@@ -79,6 +101,22 @@ class CriticOptimizerContinuous:
         self.norm_loss_q = nn.SmoothL1Loss()
 
     def train(self, batch_state, batch_action, batch_reward, batch_next_state):
+
+        # Convert to tensors
+        batch_state = torch.from_numpy(np.stack(batch_state)) \
+            .type(torch.float32) \
+            .to(self.critic.device)
+        batch_action = torch.from_numpy(np.stack(batch_action)) \
+            .type(torch.float32) \
+            .to(self.critic.device)
+        batch_next_state = torch.from_numpy(np.stack(batch_next_state)) \
+            .type(torch.float32) \
+            .to(self.critic.device)
+        batch_reward = torch.from_numpy(np.stack(batch_reward)) \
+            .type(torch.float32) \
+            .to(self.critic.device)
+
+        # Collect shapes
         batch_size = batch_state.size(0)
         observations = self.critic.observations
         actions = self.critic.actions
