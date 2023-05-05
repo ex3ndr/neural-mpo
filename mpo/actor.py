@@ -8,10 +8,10 @@ from mpo.math.cholesky import cholesky_vector_size, cholesky_vector_to_matrix_t
 
 
 class ActorContinuous(nn.Module):
-    def __init__(self, device, observations, actions, actions_space):
+    def __init__(self, device, observations, actions, action_space):
         super(ActorContinuous, self).__init__()
         self.actions = actions
-        self.actions_space = actions_space
+        self.action_space = action_space
         self.observations = observations
         self.device = device
 
@@ -51,8 +51,8 @@ class ActorContinuous(nn.Module):
 
             # Re-scale
             action = action.cpu()
-            action_low = torch.from_numpy(np.array([self.env.action_space.low]))
-            action_high = torch.from_numpy(np.array([self.env.action_space.high]))
+            action_low = torch.from_numpy(np.array([self.action_space.low]))
+            action_high = torch.from_numpy(np.array([self.action_space.high]))
             action = action_low + (action_high - action_low) * action
 
         return action[0].numpy()
@@ -64,8 +64,8 @@ class ActorContinuous(nn.Module):
 
             # Re-scale
             action = action.cpu()
-            action_low = torch.from_numpy(np.array([self.env.action_space.low]))
-            action_high = torch.from_numpy(np.array([self.env.action_space.high]))
+            action_low = torch.from_numpy(np.array([self.action_space.low]))
+            action_high = torch.from_numpy(np.array([self.action_space.high]))
             action = action_low + (action_high - action_low) * action
 
         return action[0].numpy()
