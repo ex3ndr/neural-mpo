@@ -1,7 +1,7 @@
 import torch
 from mpo import MPO
 import gymnasium as gym
-
+import time
 
 def main():
     # Loading the environment
@@ -9,28 +9,31 @@ def main():
     print(f"Using {device} device")
 
     # Create environment
-    torch.autograd.set_detect_anomaly(True)
-    env = gym.make("LunarLander-v2", continuous=True)
-    model = MPO(device, env, sample_episode_max_step=1024, sample_episode_num=8, sync_to="latest.ph")
-
-    # Train
-    model.train(iteration_num=200)
-
-    # Test
-    env = gym.make("LunarLander-v2", continuous=True, render_mode="human")
+    env = gym.make("HalfCheetah-v4", render_mode="human")
+    model = MPO(device, env)
     while True:
         observation, info = env.reset()
-        while True:
+        model.load_model("latest.ph")
+        total_reward = 0
+        max_t = 200
+        t = 0
+        while t < max_t:
+            t = t + 1
 
             # Execute action
-            action = model.act(observation)
+            action = model.act_sample(observation)
+
+            # print(action)
 
             # Render
             observation, reward, terminated, truncated, info = env.step(action)
+            total_reward += reward
 
             # Break
             if terminated or truncated:
                 break
+
+        print(total_reward)
 
 
 if __name__ == '__main__':

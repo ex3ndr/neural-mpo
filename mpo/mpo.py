@@ -46,15 +46,15 @@ class MPO(object):
                  device,
                  env,
                  dual_constraint=0.1,
-                 kl_mean_constraint=0.01,
-                 kl_var_constraint=0.0001,
+                 kl_mean_constraint=0.001,
+                 kl_var_constraint=0.00001,
                  kl_constraint=0.01,
                  discount_factor=0.99,
                  alpha_mean_scale=1.0,
-                 alpha_var_scale=100.0,
-                 alpha_scale=10.0,
-                 alpha_mean_max=0.1,
-                 alpha_var_max=10.0,
+                 alpha_var_scale=1.0,
+                 alpha_scale=1.0,
+                 alpha_mean_max=1.0,
+                 alpha_var_max=1.0,
                  alpha_max=1.0,
 
                  # Sampling
@@ -64,10 +64,10 @@ class MPO(object):
 
                  # Batching
                  eval_batch_size=64,
-                 eval_batch=3,
-                 improve_batch=256,
+                 eval_batch=4,
+                 improve_batch=8,
                  improve_batch_size=256,
-                 improve_m_step_count=4,
+                 improve_m_step_count=64,
 
                  # Auto save
                  sync_to=None
@@ -144,8 +144,8 @@ class MPO(object):
                                         kl_constraint, 3e-4)
 
         # Sampler
-        self.sampler = SamplerSimple(env, sample_episode_max_step)
-        # self.sampler = SamplerBalanced(env, sample_episode_max_step)
+        # self.sampler = SamplerSimple(env, sample_episode_max_step)
+        self.sampler = SamplerBalanced(env, sample_episode_max_step)
 
         # Buffers
         self.experiences = ExperienceBuffer()
@@ -162,6 +162,9 @@ class MPO(object):
 
     def act(self, state):
         return self.target_actor.action(state)
+
+    def act_sample(self, state):
+        return self.target_actor.action_sample(state)
 
     def train(self, iteration_num=1000, log_dir=None):
         """
@@ -237,11 +240,12 @@ class MPO(object):
             # Logging
             #
 
-            print('iteration :', it)
-            print('  episodes :', self.total_episodes)
-            print('  steps :', self.total_steps)
-            print('  return :', stat_mean_return)
+            print('iteration:', it)
+            print('  episodes    :', self.total_episodes)
+            print('  steps       :', self.total_steps)
+            print('  mean return :', stat_mean_return)
             print('  mean reward :', stat_mean_reward)
+            print('  eta         :', self.e_step.eta)
             writer.add_scalar('train/mean_return', stat_mean_return, it)
             writer.add_scalar('train/mean_reward', stat_mean_reward, it)
             writer.add_scalar('train/eta', self.e_step.eta, it)

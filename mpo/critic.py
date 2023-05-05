@@ -12,6 +12,7 @@ class Critic(nn.Module):
         self.observations = observations
         self.actions = actions
         # https://arxiv.org/pdf/2304.13653.pdf, page 34
+        self.input = torch.nn.LayerNorm(observations + actions)
         self.layer_1 = nn.Linear(observations + actions, 400)
         self.layer_2 = nn.Linear(400, 400)
         self.layer_3 = nn.Linear(400, 300)
@@ -25,6 +26,7 @@ class Critic(nn.Module):
 
     def forward(self, state, action):
         x = torch.cat([state, action], dim=1)
+        x = F.tanh(self.input(x))
         x = F.relu(self.layer_1(x))
         x = F.relu(self.layer_2(x))
         x = F.relu(self.layer_3(x))

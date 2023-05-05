@@ -38,7 +38,7 @@ class MStepDiscrete:
         self.actor_optimizer.zero_grad()
         loss_l = -(loss_p + self.alpha * (self.alpha_kl - kl))
         loss_l.backward()
-        clip_grad_norm_(self.actor.parameters(), 0.1)
+        clip_grad_norm_(self.actor.parameters(), 0.5)
         self.actor_optimizer.step()
 
 
@@ -87,5 +87,5 @@ class MStepContinuous:
         loss_l = -(loss_p + self.alpha_mu * (self.alpha_kl_mu - kl_mu) + self.alpha_sigma * (
                 self.alpha_kl_sigma - kl_sigma))
         loss_l.backward()
-        clip_grad_norm_(self.actor.parameters(), 0.1)
+        clip_grad_norm_(self.actor.parameters(), 0.5)
         self.actor_optimizer.step()

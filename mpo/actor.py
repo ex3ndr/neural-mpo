@@ -16,6 +16,7 @@ class ActorContinuous(nn.Module):
         self.device = device
 
         # https://arxiv.org/pdf/2304.13653.pdf, page 34
+        self.input = torch.nn.LayerNorm(observations)
         self.layer_1 = nn.Linear(observations, 256)
         self.layer_2 = nn.Linear(256, 256)
         self.layer_3 = nn.Linear(256, 128)
@@ -31,7 +32,8 @@ class ActorContinuous(nn.Module):
 
     def forward(self, state):
         # Network
-        x = F.relu(self.layer_1(state))
+        x = F.tanh(self.input(state))
+        x = F.relu(self.layer_1(x))
         x = F.relu(self.layer_2(x))
         x = F.relu(self.layer_3(x))
         mean = torch.sigmoid(self.output_mean(x))
@@ -79,6 +81,7 @@ class ActorDiscrete(nn.Module):
         self.observations = observations
 
         # https://arxiv.org/pdf/2304.13653.pdf, page 34
+        self.input = torch.nn.LayerNorm(observations)
         self.layer_1 = nn.Linear(observations, 256)
         self.layer_2 = nn.Linear(256, 256)
         self.layer_3 = nn.Linear(256, 128)
@@ -91,7 +94,8 @@ class ActorDiscrete(nn.Module):
         torch.nn.init.uniform_(self.output.weight.data, -3e-3, 3e-3)
 
     def forward(self, state):
-        x = F.relu(self.layer_1(state))
+        x = F.tanh(self.input(state))
+        x = F.relu(self.layer_1(x))
         x = F.relu(self.layer_2(x))
         x = F.relu(self.layer_3(x))
         x = torch.softmax(self.output(x), dim=-1)

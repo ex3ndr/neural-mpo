@@ -37,22 +37,20 @@ class SamplerBalanced:
 
     def sample(self, actor, episodes):
         result = []
-        total_steps = 0
-        for _ in tqdm(range(episodes), desc='Sampling'):
-            sampled = self.__sample_episode(actor)
-            result.append(sampled)
-            total_steps += len(sampled)
-        return result, episodes * self.max_step
-
-    def __sample_episode(self, actor):
         buff = []
         state, _ = self.env.reset()
-        for steps in range(self.max_step):
-            action = actor.action_sample(state)
-            next_state, reward, termination, truncated, _ = self.env.step(action)
-            buff.append((state, action, next_state, reward))
-            if termination or truncated:
-                state, _ = self.env.reset()
-            else:
-                state = next_state
-        return buff
+        with tqdm(total=episodes * self.max_step, desc='Sampling') as pbar:
+            for steps in range(self.max_step * episodes):
+                action = actor.action_sample(state)
+                next_state, reward, termination, truncated, _ = self.env.step(action)
+                buff.append((state, action, next_state, reward))
+                if termination or truncated:
+                    state, _ = self.env.reset()
+                    result.append(buff)
+                    buff = []
+                else:
+                    state = next_state
+                pbar.update(1)
+        if len(buff) > 0:
+            result.append(buff)
+        return result, episodes * self.max_step
