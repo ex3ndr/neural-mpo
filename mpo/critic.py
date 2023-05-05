@@ -101,7 +101,6 @@ class CriticOptimizerContinuous:
         self.norm_loss_q = nn.SmoothL1Loss()
 
     def train(self, batch_state, batch_action, batch_reward, batch_next_state):
-
         # Convert to tensors
         batch_state = torch.from_numpy(np.stack(batch_state)) \
             .type(torch.float32) \

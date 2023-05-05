@@ -8,9 +8,10 @@ from mpo.math.cholesky import cholesky_vector_size, cholesky_vector_to_matrix_t
 
 
 class ActorContinuous(nn.Module):
-    def __init__(self, device, observations, actions):
+    def __init__(self, device, observations, actions, actions_space):
         super(ActorContinuous, self).__init__()
         self.actions = actions
+        self.actions_space = actions_space
         self.observations = observations
         self.device = device
 
@@ -47,13 +48,27 @@ class ActorContinuous(nn.Module):
             mean, cholesky = self.forward(state)
             action_distribution = MultivariateNormal(mean, scale_tril=cholesky)
             action = action_distribution.sample()
-        return action[0].cpu().numpy()
+
+            # Re-scale
+            action = action.cpu()
+            action_low = torch.from_numpy(np.array([self.env.action_space.low]))
+            action_high = torch.from_numpy(np.array([self.env.action_space.high]))
+            action = action_low + (action_high - action_low) * action
+
+        return action[0].numpy()
 
     def action(self, state):
         with torch.no_grad():
             state = torch.from_numpy(np.array([state])).type(torch.float32).to(self.device)
-            mean, _ = self.forward(state)
-        return mean[0].cpu().numpy()
+            action, _ = self.forward(state)
+
+            # Re-scale
+            action = action.cpu()
+            action_low = torch.from_numpy(np.array([self.env.action_space.low]))
+            action_high = torch.from_numpy(np.array([self.env.action_space.high]))
+            action = action_low + (action_high - action_low) * action
+
+        return action[0].numpy()
 
 
 class ActorDiscrete(nn.Module):

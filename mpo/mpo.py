@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -9,7 +10,7 @@ from mpo.e_step import EStepContinuous, EStepDiscrete
 from mpo.experience import ExperienceBuffer
 from mpo.m_step import MStepDiscrete, MStepContinuous
 from mpo.replaybuffer import ReplayBuffer
-from mpo.sampler import SamplerSimple
+from mpo.sampler import SamplerSimple, SamplerBalanced
 
 
 class MPO(object):
@@ -64,13 +65,16 @@ class MPO(object):
                  # Batching
                  eval_batch_size=64,
                  eval_batch=3,
-                 improve_batch=16,
+                 improve_batch=256,
                  improve_batch_size=256,
-                 improve_m_step_count=4
+                 improve_m_step_count=4,
 
+                 # Auto save
+                 sync_to=None
                  ):
         self.device = device
         self.env = env
+        self.sync_to = sync_to
 
         # Load the environment parameter space
         self.observations = env.observation_space.shape[0]
@@ -97,8 +101,9 @@ class MPO(object):
         self.critic = Critic(self.device, self.observations, self.actions).to(self.device)
         self.target_critic = Critic(self.device, self.observations, self.actions).to(self.device)
         if self.continuous_action_space:
-            self.actor = ActorContinuous(self.device, self.observations, self.actions).to(self.device)
-            self.target_actor = ActorContinuous(self.device, self.observations, self.actions).to(self.device)
+            self.actor = ActorContinuous(self.device, self.observations, self.actions, env.action_space).to(self.device)
+            self.target_actor = ActorContinuous(self.device, self.observations, self.actions, env.action_space).to(
+                self.device)
         else:
             self.actor = ActorDiscrete(self.device, self.observations, self.actions).to(self.device)
             self.target_actor = ActorDiscrete(self.device, self.observations, self.actions).to(self.device)
@@ -140,6 +145,7 @@ class MPO(object):
 
         # Sampler
         self.sampler = SamplerSimple(env, sample_episode_max_step)
+        # self.sampler = SamplerBalanced(env, sample_episode_max_step)
 
         # Buffers
         self.experiences = ExperienceBuffer()
@@ -148,6 +154,11 @@ class MPO(object):
         self.iteration = 0
         self.total_steps = 0
         self.total_episodes = 0
+
+        # Load model
+        if self.sync_to is not None:
+            if os.path.exists(sync_to):
+                self.load_model(self.sync_to)
 
     def act(self, state):
         return self.target_actor.action(state)
@@ -187,6 +198,10 @@ class MPO(object):
                         batch_reward=reward_batch,
                     )
 
+            # Copy critic to target critic
+            for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
+                target_param.data.copy_(param.data)
+
             # Skip if there is not enough experiences
             if len(self.experiences) < self.improve_batch_size:
                 continue
@@ -205,12 +220,10 @@ class MPO(object):
                     self.m_step.train(state_batch, qij, actions, probs)
 
             #
-            # Copy to target networks
+            # Copy actor to target actor
             #
 
             for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
-                target_param.data.copy_(param.data)
-            for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
                 target_param.data.copy_(param.data)
 
             #
@@ -232,6 +245,12 @@ class MPO(object):
             writer.add_scalar('train/mean_return', stat_mean_return, it)
             writer.add_scalar('train/mean_reward', stat_mean_reward, it)
             writer.add_scalar('train/eta', self.e_step.eta, it)
+
+            #
+            # Save model
+            #
+            if self.sync_to is not None:
+                self.save_model(self.sync_to)
 
         # end training
         if writer is not None:

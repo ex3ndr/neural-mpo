@@ -10,14 +10,14 @@ def main():
 
     # Create environment
     torch.autograd.set_detect_anomaly(True)
-    env = gym.make("LunarLander-v2", continuous=False)
-    model = MPO(device, env, sample_episode_max_step=1000)
+    env = gym.make("LunarLander-v2", continuous=True)
+    model = MPO(device, env, sample_episode_max_step=1024, sample_episode_num=8, sync_to="latest.ph")
 
     # Train
     model.train(iteration_num=200)
 
     # Test
-    env = gym.make("LunarLander-v2", continuous=False, render_mode="human")
+    env = gym.make("LunarLander-v2", continuous=True, render_mode="human")
     while True:
         observation, info = env.reset()
         while True:
