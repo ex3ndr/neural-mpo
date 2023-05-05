@@ -1,7 +1,6 @@
-import os
 import numpy as np
-from tqdm import tqdm
 import torch
+from tqdm import tqdm
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from mpo.actor import ActorContinuous, ActorDiscrete
@@ -56,47 +55,53 @@ class MPO(object):
                  alpha_mean_max=0.1,
                  alpha_var_max=10.0,
                  alpha_max=1.0,
-                 sample_episode_num=30,
-                 sample_episode_maxstep=200,
-                 sample_action_num=64,
-                 batch_size=256,
-                 episode_rerun_num=3,
-                 mstep_iteration_num=5):
+
+                 # Sampling
+                 sample_episode_num=200,
+                 sample_episode_max_step=200,
+                 sample_action_num=32,
+
+                 # Batching
+                 eval_batch_size=64,
+                 eval_batch=3,
+                 improve_batch=16,
+                 improve_batch_size=256,
+                 improve_m_step_count=4
+
+                 ):
         self.device = device
         self.env = env
+
+        # Load the environment parameter space
+        self.observations = env.observation_space.shape[0]
         if self.env.action_space.dtype == np.float32:
             self.continuous_action_space = True
-        else:  # discrete action space
+            self.actions = env.action_space.shape[0]
+        else:
             self.continuous_action_space = False
+            self.actions = env.action_space.n
 
-        # the number of dimensions of state space
-        self.ds = env.observation_space.shape[0]
-        # the number of dimensions of action space
-        if self.continuous_action_space:
-            self.da = env.action_space.shape[0]
-        else:  # discrete action space
-            self.da = env.action_space.n
-
-        self.ε_dual = dual_constraint
+        # Sampling
         self.sample_episode_num = sample_episode_num
-        self.sample_episode_maxstep = sample_episode_maxstep
+        self.sample_episode_max_step = sample_episode_max_step
         self.sample_action_num = sample_action_num
-        self.batch_size = batch_size
-        self.episode_rerun_num = episode_rerun_num
-        self.mstep_iteration_num = mstep_iteration_num
 
-        if not self.continuous_action_space:
-            self.A_eye = torch.eye(self.da).to(self.device)
+        # Batching
+        self.eval_batch_size = eval_batch_size
+        self.eval_batch = eval_batch
+        self.improve_batch = improve_batch
+        self.improve_batch_size = improve_batch_size
+        self.improve_m_step_count = improve_m_step_count
 
         # Networks
-        self.critic = Critic(self.device, self.ds, self.da).to(self.device)
-        self.target_critic = Critic(self.device, self.ds, self.da).to(self.device)
+        self.critic = Critic(self.device, self.observations, self.actions).to(self.device)
+        self.target_critic = Critic(self.device, self.observations, self.actions).to(self.device)
         if self.continuous_action_space:
-            self.actor = ActorContinuous(self.device, self.ds, self.da).to(self.device)
-            self.target_actor = ActorContinuous(self.device, self.ds, self.da).to(self.device)
+            self.actor = ActorContinuous(self.device, self.observations, self.actions).to(self.device)
+            self.target_actor = ActorContinuous(self.device, self.observations, self.actions).to(self.device)
         else:
-            self.actor = ActorDiscrete(self.device, self.ds, self.da).to(self.device)
-            self.target_actor = ActorDiscrete(self.device, self.ds, self.da).to(self.device)
+            self.actor = ActorDiscrete(self.device, self.observations, self.actions).to(self.device)
+            self.target_actor = ActorDiscrete(self.device, self.observations, self.actions).to(self.device)
         for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
             target_param.data.copy_(param.data)
             target_param.requires_grad = False
@@ -114,9 +119,9 @@ class MPO(object):
                 sample_num=self.sample_action_num,
                 lr=3e-4
             )
-            self.e_step = EStepContinuous(self.ds, self.da, self.target_actor, self.target_critic,
-                                          self.sample_action_num)
-            self.m_step = MStepContinuous(self.ds, self.da, self.actor, sample_action_num,
+            self.e_step = EStepContinuous(self.observations, self.actions, self.target_actor, self.target_critic,
+                                          dual_constraint, self.sample_action_num)
+            self.m_step = MStepContinuous(self.observations, self.actions, self.actor, sample_action_num,
                                           alpha_mean_scale, alpha_var_scale,
                                           alpha_mean_max, alpha_var_max, kl_mean_constraint, kl_var_constraint,
                                           3e-4)
@@ -128,47 +133,54 @@ class MPO(object):
                 discount_factor=discount_factor,
                 lr=3e-4
             )
-            self.e_step = EStepDiscrete(self.ds, self.da, self.target_actor, self.target_critic)
-            self.m_step = MStepDiscrete(self.ds, self.da, self.actor, alpha_scale, alpha_max, kl_constraint, 3e-4)
+            self.e_step = EStepDiscrete(self.observations, self.actions, self.target_actor, self.target_critic,
+                                        dual_constraint)
+            self.m_step = MStepDiscrete(self.observations, self.actions, self.actor, alpha_scale, alpha_max,
+                                        kl_constraint, 3e-4)
 
         # Sampler
-        self.sampler = SamplerSimple(env, sample_episode_maxstep)
+        self.sampler = SamplerSimple(env, sample_episode_max_step)
 
         # Buffers
         self.experiences = ExperienceBuffer()
 
-        self.iteration = 1
+        # Current iteration
+        self.iteration = 0
+        self.total_steps = 0
+        self.total_episodes = 0
 
-    def train(self, iteration_num=1000, log_dir='log'):
+    def act(self, state):
+        return self.target_actor.action(state)
+
+    def train(self, iteration_num=1000, log_dir=None):
         """
         :param iteration_num:
         :param log_dir:
         """
 
-        writer = SummaryWriter(os.path.join(log_dir, 'tb'))
-
-        for it in range(self.iteration, iteration_num + 1):
-
-            print('iteration :', it)
+        writer = SummaryWriter(log_dir)
+        for _ in range(iteration_num):
+            self.iteration += 1
+            it = self.iteration
 
             # Sample fresh episodes
-            samples = self.sampler.sample(self.target_actor, self.sample_episode_num)
+            samples, steps = self.sampler.sample(self.target_actor, self.sample_episode_num)
             replay = ReplayBuffer()
             replay.store_episodes(samples)
             self.experiences.store_episodes(samples)
+            self.total_steps += steps
+            self.total_episodes += len(samples)
 
             # Policy Evaluation
-            # [2] 3 Policy Evaluation (Step 1)
-            for r in range(self.episode_rerun_num):
-                for indices in tqdm(
-                        BatchSampler(
-                            SubsetRandomSampler(range(len(replay))), self.batch_size, drop_last=True),
-                        desc='policy evaluation {}/{}'.format(r + 1, self.episode_rerun_num)):
-                    # Load batch
-                    state_batch, action_batch, next_state_batch, reward_batch = zip(*[replay[index] for index in indices])
+            for _ in tqdm(range(self.eval_batch), desc='Policy Evaluation'):
+                replay_sampler = BatchSampler(SubsetRandomSampler(range(len(replay))), self.eval_batch_size,
+                                              drop_last=True)
+                for indices in replay_sampler:
+                    state_batch, action_batch, next_state_batch, reward_batch = zip(
+                        *[replay[index] for index in indices])
 
                     # Critic optimization
-                    loss_q, q = self.critic_optimizer.train(
+                    self.critic_optimizer.train(
                         batch_state=state_batch,
                         batch_action=action_batch,
                         batch_next_state=next_state_batch,
@@ -176,91 +188,86 @@ class MPO(object):
                     )
 
             # Skip if there is not enough experiences
-            if len(self.experiences) < self.batch_size * 8:
+            if len(self.experiences) < self.improve_batch_size:
                 continue
 
-            # Policy Improvement (Step 2 + 3)
-            for r in range(self.episode_rerun_num * 10):
+            # Policy Improvement
+            for _ in tqdm(range(self.improve_batch), desc='Policy Improvement'):
 
                 # Load experiences
-                state_batch = self.experiences.sample(self.batch_size * 8).to(self.device)
+                state_batch = self.experiences.sample(self.improve_batch_size).to(self.device)
 
                 # E-Step of Policy Improvement
-                qij, actions, probs = self.e_step.train(state_batch, self.ε_dual)
+                qij, actions, probs = self.e_step.train(state_batch)
 
                 # M-Step of Policy Improvement
-                for _ in range(self.mstep_iteration_num):
+                for _ in range(self.improve_m_step_count):
                     self.m_step.train(state_batch, qij, actions, probs)
 
             #
             # Copy to target networks
             #
 
-            self.__update_param()
+            for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
+                target_param.data.copy_(param.data)
+            for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
+                target_param.data.copy_(param.data)
+
+            #
+            # Calculate statistics
+            #
+
+            stat_mean_return = replay.mean_return()
+            stat_mean_reward = replay.mean_reward()
 
             #
             # Logging
             #
 
-            # mean_loss_q = np.mean(mean_loss_q)
-            # mean_loss_p = np.mean(mean_loss_p)
-            # mean_loss_l = np.mean(mean_loss_l)
-            # mean_est_q = np.mean(mean_est_q)
-            # # if self.continuous_action_space:
-            # #     max_kl_μ = np.max(max_kl_μ)
-            # #     max_kl_Σ = np.max(max_kl_Σ)
-            # #     mean_Σ_det = np.mean(mean_Σ_det)
-            # # else:  # discrete action space
-            # #     max_kl = np.max(max_kl)
             print('iteration :', it)
-            # print('  replay buffer :', buff_sz)
-            print('  experience buffer :', len(self.experiences))
-            # print('  mean return :', mean_return)
-            # print('  mean reward :', mean_reward)
-            # print('  mean loss_q :', mean_loss_q)
-            # print('  mean loss_p :', mean_loss_p)
-            # print('  mean loss_l :', mean_loss_l)
-            # print('  mean est_q :', mean_est_q)
-            # print('  η :', self.e_step.eta)
-            # if self.continuous_action_space:
-            #     # print('  max_kl_μ :', max_kl_μ)
-            #     # print('  max_kl_Σ :', max_kl_Σ)
-            #     # print('  mean_Σ_det :', mean_Σ_det)
-            #     print('  α_μ :', self.α_μ)
-            #     print('  α_Σ :', self.α_Σ)
-            # else:  # discrete action space
-            #     # print('  max_kl :', max_kl)
-            #     print('  α :', self.α)
-            #
-            # writer.add_scalar('return', mean_return, it)
-            # writer.add_scalar('reward', mean_reward, it)
-            # writer.add_scalar('loss_q', mean_loss_q, it)
-            # writer.add_scalar('loss_p', mean_loss_p, it)
-            # writer.add_scalar('loss_l', mean_loss_l, it)
-            # writer.add_scalar('mean_q', mean_est_q, it)
-            # writer.add_scalar('η', self.e_step.eta, it)
-            # if self.continuous_action_space:
-            #     # writer.add_scalar('max_kl_μ', max_kl_μ, it)
-            #     # writer.add_scalar('max_kl_Σ', max_kl_Σ, it)
-            #     # writer.add_scalar('mean_Σ_det', mean_Σ_det, it)
-            #     writer.add_scalar('α_μ', self.α_μ, it)
-            #     writer.add_scalar('α_Σ', self.α_Σ, it)
-            # else:
-            #     # writer.add_scalar('η_kl', max_kl, it)
-            #     writer.add_scalar('α', self.α, it)
-            # writer.flush()
+            print('  episodes :', self.total_episodes)
+            print('  steps :', self.total_steps)
+            print('  return :', stat_mean_return)
+            print('  mean reward :', stat_mean_reward)
+            writer.add_scalar('train/mean_return', stat_mean_return, it)
+            writer.add_scalar('train/mean_reward', stat_mean_reward, it)
+            writer.add_scalar('train/eta', self.e_step.eta, it)
 
         # end training
         if writer is not None:
             writer.close()
 
-    def __update_param(self):
-        """
-        Sets target parameters to trained parameter
-        """
-        # Update policy parameters
-        for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
-            target_param.data.copy_(param.data)
-        # Update critic parameters
-        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
-            target_param.data.copy_(param.data)
+    def save_model(self, path):
+        data = {
+            # Parameters
+            'iteration': self.iteration,
+            'total_episodes': self.total_episodes,
+            'total_steps': self.total_steps,
+
+            # Models
+            'actor_state_dict': self.actor.state_dict(),
+            'target_actor_state_dict': self.target_actor.state_dict(),
+            'critic_state_dict': self.critic.state_dict(),
+            'target_critic_state_dict': self.target_critic.state_dict(),
+
+            # Optimizers
+            'actor_optim_state_dict': self.m_step.actor_optimizer.state_dict(),
+            'critic_optim_state_dict': self.critic_optimizer.critic_optimizer.state_dict()
+        }
+        torch.save(data, path)
+
+    def load_model(self, path):
+        checkpoint = torch.load(path)
+        self.iteration = checkpoint['iteration']
+        self.total_episodes = checkpoint['total_episodes']
+        self.total_steps = checkpoint['total_steps']
+        self.critic.load_state_dict(checkpoint['critic_state_dict'])
+        self.target_critic.load_state_dict(checkpoint['target_critic_state_dict'])
+        self.actor.load_state_dict(checkpoint['actor_state_dict'])
+        self.target_actor.load_state_dict(checkpoint['target_actor_state_dict'])
+        self.critic_optimizer.critic_optimizer.load_state_dict(checkpoint['critic_optim_state_dict'])
+        self.m_step.actor_optimizer.load_state_dict(checkpoint['actor_optim_state_dict'])
+        self.critic.train()
+        self.target_critic.train()
+        self.actor.train()
+        self.target_actor.train()

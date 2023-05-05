@@ -1,3 +1,6 @@
+from tqdm import tqdm
+
+
 class SamplerSimple:
     def __init__(self, env, max_step):
         self.env = env
@@ -5,9 +8,12 @@ class SamplerSimple:
 
     def sample(self, actor, episodes):
         result = []
-        for i in range(episodes):
-            result.append(self.__sample_episode(actor))
-        return result
+        total_steps = 0
+        for _ in tqdm(range(episodes), desc='Sampling'):
+            sampled = self.__sample_episode(actor)
+            result.append(sampled)
+            total_steps += len(sampled)
+        return result, total_steps
 
     def __sample_episode(self, actor):
         buff = []

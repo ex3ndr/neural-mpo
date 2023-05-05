@@ -7,15 +7,16 @@ from mpo.math.dual import solve_dual_discrete, solve_dual_continuous
 
 class EStepDiscrete:
 
-    def __init__(self, observations, actions, target_actor, target_critic):
+    def __init__(self, observations, actions, target_actor, target_critic, dual_constraint):
         self.observations = observations
         self.actions = actions
         self.target_critic = target_critic
         self.target_actor = target_actor
         self.eta = np.random.rand()
         self.A_eye = torch.eye(actions)
+        self.dual_constraint = dual_constraint
 
-    def train(self, batch_state, eps):
+    def train(self, batch_state):
         batch_size = len(batch_state)
         actions = torch.arange(self.actions)[..., None].expand(self.actions, batch_size)
 
@@ -38,7 +39,7 @@ class EStepDiscrete:
         ).transpose(0, 1)  # (da, K)
 
         # Solve eta
-        self.eta = solve_dual_discrete(target_q, b_prob, self.eta, eps)
+        self.eta = solve_dual_discrete(target_q, b_prob, self.eta, self.dual_constraint)
 
         # Calculate qij
         qij = torch.softmax(target_q / self.eta, dim=0)  # (N, K) or (da, K)
@@ -47,15 +48,16 @@ class EStepDiscrete:
 
 
 class EStepContinuous:
-    def __init__(self, observations, actions, target_actor, target_critic, action_samples):
+    def __init__(self, observations, actions, target_actor, target_critic, dual_constraint, action_samples):
         self.observations = observations
         self.actions = actions
         self.target_critic = target_critic
         self.target_actor = target_actor
         self.action_samples = action_samples
         self.eta = np.random.rand()
+        self.dual_constraint = dual_constraint
 
-    def train(self, batch_state, eps):
+    def train(self, batch_state):
         # sample N actions per state
         b_μ, b_A = self.target_actor.forward(batch_state)  # (K,)
         b = MultivariateNormal(b_μ, scale_tril=b_A)  # (K,)
@@ -67,7 +69,7 @@ class EStepContinuous:
         ).reshape(self.action_samples, -1)  # (N, K)
 
         # Solve eta
-        self.eta = solve_dual_continuous(target_q, self.eta, eps)
+        self.eta = solve_dual_continuous(target_q, self.eta, self.dual_constraint)
 
         # Calculate qij
         qij = torch.softmax(target_q / self.eta, dim=0)  # (N, K) or (da, K)
