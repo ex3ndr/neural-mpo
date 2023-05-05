@@ -14,10 +14,7 @@ def main():
     model = MPO(device, env, sample_episode_maxstep=200)
 
     # Train
-    # try:
-    model.train(iteration_num=100)
-    #except:
-    #    pass
+    model.train(iteration_num=200)
 
     # Test
     env = gym.make("LunarLander-v2", continuous=True, render_mode="human")
