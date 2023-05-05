@@ -44,7 +44,7 @@ class CriticOptimizerDiscrete:
         self.norm_loss_q = nn.SmoothL1Loss()
         self.action_eye = torch.eye(critic.actions)
 
-    def train(self, batch_state, batch_action, batch_reward, batch_next_state):
+    def train(self, batch_state, batch_action, batch_reward, batch_next_state, stats):
         # Convert to tensors
         batch_state = torch.from_numpy(np.stack(batch_state)) \
             .type(torch.float32) \
@@ -102,7 +102,7 @@ class CriticOptimizerContinuous:
         self.target_actor = target_actor
         self.norm_loss_q = nn.SmoothL1Loss()
 
-    def train(self, batch_state, batch_action, batch_reward, batch_next_state):
+    def train(self, batch_state, batch_action, batch_reward, batch_next_state, stats):
         # Convert to tensors
         batch_state = torch.from_numpy(np.stack(batch_state)) \
             .type(torch.float32) \

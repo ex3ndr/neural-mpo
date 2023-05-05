@@ -16,7 +16,7 @@ class EStepDiscrete:
         self.A_eye = torch.eye(actions)
         self.dual_constraint = dual_constraint
 
-    def train(self, batch_state):
+    def train(self, batch_state, stats):
         batch_size = len(batch_state)
         actions = torch.arange(self.actions)[..., None].expand(self.actions, batch_size)
 
@@ -57,7 +57,7 @@ class EStepContinuous:
         self.eta = np.random.rand()
         self.dual_constraint = dual_constraint
 
-    def train(self, batch_state):
+    def train(self, batch_state, stats):
         # sample N actions per state
         b_μ, b_A = self.target_actor.forward(batch_state)  # (K,)
         b = MultivariateNormal(b_μ, scale_tril=b_A)  # (K,)

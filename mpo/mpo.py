@@ -11,51 +11,18 @@ from mpo.experience import ExperienceBuffer
 from mpo.m_step import MStepDiscrete, MStepContinuous
 from mpo.replaybuffer import ReplayBuffer
 from mpo.sampler import SamplerSimple, SamplerBalanced
+from mpo.stats import Stats
 
 
 class MPO(object):
-    """
-    Maximum A Posteriori Policy Optimization (MPO)
-    :param device:
-    :param env: gym environment
-    :param dual_constraint:
-        (float) hard constraint of the dual formulation in the E-step
-        correspond to [2] p.4 ε
-    :param kl_mean_constraint:
-        (float) hard constraint of the mean in the M-step
-        correspond to [2] p.6 ε_μ for continuous action space
-    :param kl_var_constraint:
-        (float) hard constraint of the covariance in the M-step
-        correspond to [2] p.6 ε_Σ for continuous action space
-    :param kl_constraint:
-        (float) hard constraint in the M-step
-        correspond to [2] p.6 ε_π for discrete action space
-    :param discount_factor: (float) discount factor used in Policy Evaluation
-    :param alpha_scale: (float) scaling factor of the lagrangian multiplier in the M-step
-    :param sample_episode_num: the number of sampled episodes
-    :param sample_episode_maxstep: maximum sample steps of an episode
-    :param sample_action_num:
-    :param batch_size: (int) size of the sampled mini-batch
-    :param episode_rerun_num:
-    :param mstep_iteration_num: (int) the number of iterations of the M-step
-    [1] https://arxiv.org/pdf/1806.06920.pdf
-    [2] https://arxiv.org/pdf/1812.02256.pdf
-    """
-
     def __init__(self,
                  device,
                  env,
                  dual_constraint=0.1,
-                 kl_mean_constraint=0.001,
+                 kl_mean_constraint=0.0005,
                  kl_var_constraint=0.00001,
-                 kl_constraint=0.01,
+                 kl_constraint=0.1,
                  discount_factor=0.99,
-                 alpha_mean_scale=1.0,
-                 alpha_var_scale=1.0,
-                 alpha_scale=1.0,
-                 alpha_mean_max=1.0,
-                 alpha_var_max=1.0,
-                 alpha_max=1.0,
 
                  # Sampling
                  sample_episode_num=200,
@@ -122,26 +89,23 @@ class MPO(object):
                 target_actor=self.target_actor,
                 discount_factor=discount_factor,
                 sample_num=self.sample_action_num,
-                lr=3e-4
+                lr=1e-3
             )
             self.e_step = EStepContinuous(self.observations, self.actions, self.target_actor, self.target_critic,
                                           dual_constraint, self.sample_action_num)
             self.m_step = MStepContinuous(self.observations, self.actions, self.actor, sample_action_num,
-                                          alpha_mean_scale, alpha_var_scale,
-                                          alpha_mean_max, alpha_var_max, kl_mean_constraint, kl_var_constraint,
-                                          3e-4)
+                                          kl_mean_constraint, kl_var_constraint, 1e-3)
         else:
             self.critic_optimizer = CriticOptimizerDiscrete(
                 critic=self.critic,
                 target_critic=self.target_critic,
                 target_actor=self.target_actor,
                 discount_factor=discount_factor,
-                lr=3e-4
+                lr=1e-3
             )
             self.e_step = EStepDiscrete(self.observations, self.actions, self.target_actor, self.target_critic,
                                         dual_constraint)
-            self.m_step = MStepDiscrete(self.observations, self.actions, self.actor, alpha_scale, alpha_max,
-                                        kl_constraint, 3e-4)
+            self.m_step = MStepDiscrete(self.observations, self.actions, self.actor, kl_constraint, 1e-3)
 
         # Sampler
         # self.sampler = SamplerSimple(env, sample_episode_max_step)
@@ -176,6 +140,7 @@ class MPO(object):
         for _ in range(iteration_num):
             self.iteration += 1
             it = self.iteration
+            stats = Stats()
 
             # Sample fresh episodes
             samples, steps = self.sampler.sample(self.target_actor, self.sample_episode_num)
@@ -199,6 +164,7 @@ class MPO(object):
                         batch_action=action_batch,
                         batch_next_state=next_state_batch,
                         batch_reward=reward_batch,
+                        stats=stats
                     )
 
             # Copy critic to target critic
@@ -216,11 +182,11 @@ class MPO(object):
                 state_batch = self.experiences.sample(self.improve_batch_size).to(self.device)
 
                 # E-Step of Policy Improvement
-                qij, actions, probs = self.e_step.train(state_batch)
+                qij, actions, probs = self.e_step.train(state_batch, stats)
 
                 # M-Step of Policy Improvement
                 for _ in range(self.improve_m_step_count):
-                    self.m_step.train(state_batch, qij, actions, probs)
+                    self.m_step.train(state_batch, qij, actions, probs, stats)
 
             #
             # Copy actor to target actor
@@ -240,6 +206,7 @@ class MPO(object):
             # Logging
             #
 
+            print()
             print('iteration:', it)
             print('  episodes    :', self.total_episodes)
             print('  steps       :', self.total_steps)
@@ -249,6 +216,11 @@ class MPO(object):
             writer.add_scalar('train/mean_return', stat_mean_return, it)
             writer.add_scalar('train/mean_reward', stat_mean_reward, it)
             writer.add_scalar('train/eta', self.e_step.eta, it)
+            for name in stats.scalars:
+                value = stats.scalars[name]
+                mean = np.mean(value)
+                writer.add_scalar('train/' + name, mean, it)
+                print(name, ':', mean)
 
             #
             # Save model

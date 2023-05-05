@@ -7,17 +7,15 @@ from mpo.math.kl import categorical_kl, gaussian_kl
 
 
 class MStepDiscrete:
-    def __init__(self, observations, actions, actor, alpha_scale, alpha_max, alpha_kl, lr):
+    def __init__(self, observations, actions, actor, alpha_kl, lr):
         self.observations = observations
         self.actions = actions
         self.alpha = 0.0
         self.actor = actor
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr)
-        self.alpha_scale = alpha_scale
-        self.alpha_max = alpha_max
         self.alpha_kl = alpha_kl
 
-    def train(self, batch_state, qij, actions, probs):
+    def train(self, batch_state, qij, actions, probs, stats):
         pi_p = self.actor.forward(batch_state)  # (K, da)
         # First term of last eq of [2] p.5
         pi = Categorical(probs=pi_p)  # (K,)
@@ -31,8 +29,7 @@ class MStepDiscrete:
         # this equation is derived from last eq of [2] p.5,
         # just differentiate with respect to α
         # and update α so that the equation is to be minimized.
-        self.alpha -= self.alpha_scale * (self.alpha_kl - kl).detach().item()
-        self.alpha = np.clip(self.alpha, 0.0, self.alpha_max)
+        self.alpha -= (self.alpha_kl - kl).detach().item()
 
         # last eq of [2] p.5
         self.actor_optimizer.zero_grad()
@@ -43,23 +40,18 @@ class MStepDiscrete:
 
 
 class MStepContinuous:
-    def __init__(self, observations, actions, actor, sample_actions, alpha_mu_scale, alpha_sigma_scale,
-                 alpha_mu_max, alpha_sigma_max, alpha_kl_mu, alpha_kl_sigma, lr):
+    def __init__(self, observations, actions, actor, sample_actions, alpha_kl_mu, alpha_kl_sigma, lr):
         self.observations = observations
         self.actions = actions
         self.actor = actor
         self.sample_actions = sample_actions
         self.alpha_mu = 0.0
         self.alpha_sigma = 0.0
-        self.alpha_mu_scale = alpha_mu_scale
-        self.alpha_sigma_scale = alpha_sigma_scale
         self.alpha_kl_mu = alpha_kl_mu
         self.alpha_kl_sigma = alpha_kl_sigma
-        self.alpha_sigma_max = alpha_sigma_max
-        self.alpha_mu_max = alpha_mu_max
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr)
 
-    def train(self, batch_state, qij, actions, probs):
+    def train(self, batch_state, qij, actions, probs, stats):
         mu, sigma = self.actor.forward(batch_state)
         # First term of last eq of [2] p.5
         # see also [2] 4.2.1 Fitting an improved Gaussian policy
@@ -77,10 +69,8 @@ class MStepContinuous:
         # this equation is derived from last eq of [2] p.5,
         # just differentiate with respect to α
         # and update α so that the equation is to be minimized.
-        self.alpha_mu -= self.alpha_mu_scale * (self.alpha_kl_mu - kl_mu).detach().item()
-        self.alpha_sigma -= self.alpha_sigma_scale * (self.alpha_kl_sigma - kl_sigma).detach().item()
-        self.alpha_mu = np.clip(0.0, self.alpha_mu, self.alpha_mu_max)
-        self.alpha_sigma = np.clip(0.0, self.alpha_sigma, self.alpha_sigma_max)
+        self.alpha_mu -= (self.alpha_kl_mu - kl_mu).detach().item()
+        self.alpha_sigma -= (self.alpha_kl_sigma - kl_sigma).detach().item()
 
         # last eq of [2] p.5
         self.actor_optimizer.zero_grad()
@@ -89,3 +79,10 @@ class MStepContinuous:
         loss_l.backward()
         clip_grad_norm_(self.actor.parameters(), 0.5)
         self.actor_optimizer.step()
+
+        # stats
+        stats.push("loss_l", loss_l.detach().item())
+        stats.push("kl_mu", kl_mu.detach().item())
+        stats.push("kl_sigma", kl_sigma.detach().item())
+        stats.push("sigma_i_det", sigma_i_det.detach().item())
+        stats.push("sigma_det", sigma_det.detach().item())

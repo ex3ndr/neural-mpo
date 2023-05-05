@@ -6,6 +6,7 @@ paper using PyTorch.
 ## References
 
 - [Maximum a Posteriori Policy Optimisation](https://arxiv.org/abs/1806.06920)
+- [Relative Entropy Regularized Policy Iteration](https://arxiv.org/abs/1812.02256)
 
 ## Prior art
 - [daisatojp's implementation](https://github.com/daisatojp/mpo) - Good example of MPO math, but many nuances are not implemented correctly
